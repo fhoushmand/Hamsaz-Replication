@@ -1,0 +1,827 @@
+/*
+ *
+ * Hands-On code of the book Introduction to Reliable Distributed Programming
+ * by Christian Cachin, Rachid Guerraoui and Luis Rodrigues
+ * Copyright (C) 2005-2011 Luis Rodrigues
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Contact
+ * 	Address:
+ *		Rua Alves Redol 9, Office 605
+ *		1000-029 Lisboa
+ *		PORTUGAL
+ * 	Email:
+ * 		ler@ist.utl.pt
+ * 	Web:
+ *		http://homepages.gsd.inesc-id.pt/~ler/
+ *
+ */
+
+package main.java.protocol.protocols.tutorialDA.consensusUTO;
+
+import main.java.protocol.protocols.tutorialDA.coordinationProtocols.MTOBPayload;
+import main.java.protocol.protocols.tutorialDA.events.ConsensusDecide;
+import main.java.protocol.protocols.tutorialDA.events.ConsensusPropose;
+import main.java.protocol.protocols.tutorialDA.events.ProcessInitEvent;
+import main.java.protocol.protocols.tutorialDA.events.SampleSendableEvent;
+import main.java.protocol.protocols.tutorialDA.utils.Call;
+import main.java.protocol.protocols.tutorialDA.utils.Debug;
+
+import net.sf.appia.core.*;
+import net.sf.appia.core.events.SendableEvent;
+import net.sf.appia.core.events.channel.ChannelInit;
+import net.sf.appia.core.message.Message;
+import org.apache.commons.lang3.SerializationUtils;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.Serializable;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.net.UnknownHostException;
+import java.util.*;
+
+
+/**
+ * Consensus-based Uniform Total Order broadcast algorithm.
+ *
+ * July 2003
+ *
+ * @author MJo�oMonteiro
+ */
+public class ConsensusUTOSession extends Session {
+
+  private SocketAddress iwp;
+  private Channel channel;
+  /* global sequence number of the message ssent by this process */
+  private int seqNumber;
+  /* Sequence number of the set of messages to deliver in the same round! */
+  private int sn;
+  /* Sets the beginning and the end of the rounds */
+  private boolean wait;
+
+  private int deliveredDelete = 0;
+
+  /*
+   * Set of delivered messages.
+   *
+   * unit: sendable event+seq number (ListElement)
+   */
+  private LinkedList<ListElement> delivered;
+
+  /*
+   * Set of unordered messages.
+   *
+   * unit: sendable event+seq number (ListElement)
+   */
+  private LinkedList<ListElement> unordered;
+
+//  public  ReplicatedObject object;
+
+  public HashMap<String, Integer> rankMap = null;
+
+  /**
+   * Standard constructor
+   *
+   * @param l
+   *          the CONoWaintingLayer
+   */
+  public ConsensusUTOSession(Layer l) {
+    super(l);
+  }
+
+  /**
+   * The event handler function. Dispatches the new event to the appropriate
+   * function.
+   *
+   * @param e
+   *          the event
+   */
+  public void handle(Event e) {
+    if (e instanceof ChannelInit)
+      handleChannelInit((ChannelInit) e);
+    else if (e instanceof ProcessInitEvent)
+      handleProcessInitEvent((ProcessInitEvent) e);
+    else if (e instanceof SampleSendableEvent) {
+      if (e.getDir() == Direction.DOWN) // call request(broadcast(m,c))
+        handleSendableEventDOWN((SampleSendableEvent) e);
+      else
+        handleSendableEventUP((SampleSendableEvent) e); // call indication(rb, deliver(m,c,i))
+    } else if (e instanceof ConsensusDecide)
+      handleConsensusDecide((ConsensusDecide) e); //call indication(cs(r')....)
+    else {
+      try {
+        e.go();
+      } catch (AppiaEventException ex) {
+        System.out.println("[ConsensusUTOSession:handle]" + ex.getMessage());
+      }
+    }
+
+  }
+
+  /**
+   * Handles channelInit event. Initializes the two lists.
+   *
+   * @param e
+   *          the channelinit event just arrived.
+   */
+  public void handleChannelInit(ChannelInit e) {
+    Debug.print("TO: handle: " + e.getClass().getName());
+
+    try {
+      e.go();
+    } catch (AppiaEventException ex) {
+      System.out.println("[ConsensusUTOSession:handleCI]:1:" + ex.getMessage());
+    }
+
+    this.channel = e.getChannel();
+
+    delivered = new LinkedList<ListElement>();
+    unordered = new LinkedList<ListElement>();
+
+    sn = 1;
+    wait = false;
+
+  }
+
+  /**
+   * Handles process init event. Now, it's the right time to initialize the
+   * consensus protocol.
+   *
+   * @param e
+   *          the sendable event.
+   */
+  public void handleProcessInitEvent(ProcessInitEvent e) {
+
+    iwp = e.getProcessSet().getSelfProcess().getSocketAddress();
+
+    try {
+      e.go();
+    } catch (AppiaEventException ex) {
+      System.out.println("[ConsensusUTOSession:handlePI]:1:" + ex.getMessage());
+    }
+
+    // initializing consensus protocol!
+    // try {
+    // ConsensusInit init= new ConsensusInit(channel,Direction.DOWN,this);
+    // init.go();
+    // } catch (AppiaEventException ex) {
+    // System.out.println("[ConsensusUTOSession:handlePI]:2:" +
+    // ex.getMessage());
+    // }
+
+  }
+
+//  public void initPropose()
+//  {
+//      ConsensusPropose cp;
+//      byte[] bytes = null;
+//      try {
+//          cp = new ConsensusPropose(channel, Direction.DOWN, this);
+//
+//          bytes = serialize(new LinkedList<>());
+//
+//          OrderProposal op = new OrderProposal(bytes,unordered);
+//          cp.value = op;
+//
+//          cp.go();
+//          Debug.print("TO: handleUP: Proposta:");
+//          for (int g = 0; g < unordered.size(); g++) {
+//              Debug.print("source:" + unordered.get(g).se.source
+//                      + " seq:" + unordered.get(g).seq);
+//
+//          }
+//          Debug.print("TO: handleUP: Proposta feita!");
+//
+//      } catch (AppiaEventException ex) {
+//          System.out.println("[ConsensusUTOSession:handleUP]" + ex.getMessage());
+//      }
+//  }
+
+  /**
+   * Handles sendable event to be sent to the network. Adds the sequence number
+   * and forwards the message into the channel.
+   *
+   * @param e
+   *          the sendable event.
+   */
+  public void handleSendableEventDOWN(SampleSendableEvent e) {
+    Debug.print("TO: handle: " + e.getClass().getName() + " DOWN");
+
+    Message om = e.getMessage();
+    MTOBPayload payload = e.getMtobPayload();
+    // inserting the global seq number of this msg
+    om.pushInt(seqNumber);
+
+
+    try {
+//      if(payload.c.equals("1"))
+      if(payload.c == null)
+      {
+        payload.rank = 0;
+      }
+      else{
+        int r = rankMap.get(payload.c);
+        rankMap.put(payload.c, r+1);
+        payload.rank = r+1;
+      }
+      e.go();
+    } catch (AppiaEventException ex) {
+      System.out.println("[ConsensusUTOSession:handleDOWN]" + ex.getMessage());
+    }
+
+    // increments the global seq number
+    seqNumber++;
+  }
+
+  /**
+   * Handles sendable event just arrived from the network.
+   *
+   * @param e
+   *          the sendable event.
+   */
+  public void handleSendableEventUP(SampleSendableEvent e) {
+    Debug.print("TO: handle: " + e.getClass().getName() + " UP");
+
+    Message om = e.getMessage();
+    MTOBPayload py = e.getMtobPayload();
+    int seq = om.popInt();
+
+    // checks if the msg has already been delivered.
+    ListElement le;
+    if (!isDelivered((SocketAddress) e.source, py.m)) {
+      le = new ListElement(e, seq, py);
+      if(!unordered.contains(le))
+        unordered.add(le);
+    }
+
+    unordered = sort(unordered);
+
+    // let's see if we can start a new round!
+    if (unordered.size() != 0 && !wait) {
+      wait = true;
+      // sends our proposal to consensus protocol!
+      ConsensusPropose cp;
+      byte[] bytes = null;
+      try {
+        cp = new ConsensusPropose(channel, Direction.DOWN, this);
+
+//        bytes = serialize(unordered);
+        LinkedList<ListElement> temp = proposal(unordered);
+
+        bytes = serialize(proposal(unordered));
+
+//        OrderProposal op = new OrderProposal(bytes,unordered, py);
+        OrderProposal op = new OrderProposal(bytes);
+        cp.value = op;
+
+        cp.go();
+        Debug.print("TO: handleUP: Proposta:");
+        for (int g = 0; g < unordered.size(); g++) {
+          Debug.print("source:" + unordered.get(g).se.source
+                  + " seq:" + unordered.get(g).seq);
+
+        }
+        Debug.print("TO: handleUP: Proposta feita!");
+
+      } catch (AppiaEventException ex) {
+        System.out.println("[ConsensusUTOSession:handleUP]" + ex.getMessage());
+      }
+    }
+
+  }
+
+  /**
+   * Handles consensus decide event just arrived from the consensus protocol.
+   *
+   * @param e
+   *          the consensus decide event.
+   */
+  public void handleConsensusDecide(ConsensusDecide e) {
+    Debug.print("TO: handle: " + e.getClass().getName());
+
+    LinkedList<ListElement> decided = deserialize(((OrderProposal) e.decision).bytes, null);
+
+//    try {
+//      BufferedWriter out = new BufferedWriter(new FileWriter("logDebug-"
+//          + iwp.toString() + ".txt", true));
+//      for (int y = 0; y < decided.size(); y++) {
+//
+//        String aux = decided.get(y).se.getMessage().popString();
+//        out.write(aux);
+//        out.newLine();
+//        decided.get(y).se.getMessage().pushString(aux);
+//
+//      }
+//      out.newLine();
+//      out.close();
+//    } catch (IOException ex) {
+//      ex.printStackTrace();
+//      System.exit(1);
+//    }
+
+    // The delivered list must be complemented with the msg in the decided
+    // list!
+    for (int i = 0; i < decided.size(); i++) {
+      if (!isDelivered((SocketAddress)decided.get(i).se.source,decided.get(i).payload.m)) {
+        // if a msg that is in decided doesn't yet belong to delivered,
+        // add it!
+        delivered.add(decided.get(i));
+      }
+    }
+
+    // update unordered list by removing the messages that are in the
+    // delivered list
+    for (int j = 0; j < unordered.size(); j++) {
+      if (isDelivered(
+              (SocketAddress)unordered.get(j).se.source,unordered.get(j).payload.m)) {
+        unordered.remove(j);
+        j--;
+      }
+    }
+
+    decided = sort(decided);
+    int x = 0;
+    // deliver the messages in the decided list, which is already ordered!
+    for (int k = 0; k < decided.size(); k++) {
+      try {
+        decided.get(k).se.go();
+      } catch (AppiaEventException ex) {
+        System.out.println("[ConsensusUTOSession:handleDecide]"
+                + ex.getMessage());
+      }
+    }
+    sn++;
+    wait = false;
+
+    // re-initializing consensus protocol!
+    // try {
+    // ConsensusInit init= new ConsensusInit(channel,Direction.DOWN,this);
+    // init.go();
+    // } catch (AppiaEventException ex) {
+    // System.out.println("[ConsensusUTOSession:handlePI]:2:" +
+    // ex.getMessage());
+    // }
+
+  }
+
+  /*
+   * Checks if the msg with seq number 'seq' and coming from 'source' has been
+   * already delivered i.e, is already in the delivered list
+   */
+  boolean isDeliveredOld(SocketAddress source, int seq) {
+
+    for (int k = 0; k < delivered.size(); k++) {
+      if (delivered.get(k).getSE().source.equals(source)
+              && delivered.get(k).getSeq() == seq)
+        return true;
+    }
+
+    return false;
+  }
+
+  boolean isDelivered(SocketAddress source, String seq) {
+
+    for (int k = 0; k < delivered.size(); k++) {
+      if (delivered.get(k).payload.m.equals(seq))
+        return true;
+    }
+
+    return false;
+  }
+
+  private LinkedList<ListElement> proposal(LinkedList<ListElement> unordered) {
+
+    LinkedList<ListElement> out = new LinkedList<>();
+    for (ListElement le : unordered)
+    {
+      MTOBPayload pendingPayload = le.payload;
+      if(pendingPayload.c != null && pendingPayload.rank != 1) {
+        if(allBeforeItisInDeliveredSet(pendingPayload)) {
+//          if()
+          out.add(le);
+          addBatchPendingCall(out, le);
+//          break;
+        }
+      }
+      else if(le.payload.c == null || le.payload.rank == 1)
+        out.add(le);
+    }
+    return out;
+  }
+
+  private void addBatchPendingCall(LinkedList<ListElement> list, ListElement element)
+  {
+    int tempRank = element.payload.rank + 1;
+    for(int i = 0; i < unordered.size()-1; i++)
+    {
+      if(unordered.get(i).payload.rank == 0)
+        continue;
+      if(unordered.get(i).payload.rank == tempRank && unordered.get(i).payload.c.equals(element.payload.c)) {
+        list.add(unordered.get(i));
+        tempRank++;
+      }
+    }
+  }
+
+  private boolean allBeforeItisInDeliveredSet(MTOBPayload pendingPayload) {
+    for (int i = 1; i < pendingPayload.rank; i++) {
+      MTOBPayload payload = new MTOBPayload();
+      payload.c = pendingPayload.c;
+      payload.rank = i;
+      if(!deliveredSetContains(payload))
+        return false;
+    }
+    return true;
+  }
+
+
+  private boolean deliveredSetContains(MTOBPayload payload)
+  {
+    for (ListElement delivered: delivered)
+    {
+      MTOBPayload mtobPayload = delivered.payload;
+      if(mtobPayload.c == null)
+        continue;
+      if(mtobPayload.c.equals(payload.c) && mtobPayload.rank == payload.rank)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+    /*
+     * Used to order deterministically the set of msg decided by consensus.
+     *
+     * The order chosen in this implementation is the order that the msgs bring in
+     * the array from consensus. That order is mantained, during the
+     * deserialization process, in the list that is the argument of this function.
+     *
+     */
+    static LinkedList<ListElement> sort(LinkedList<ListElement> list) {
+
+      Collections.sort(list, new ListElementChainedComparator(new ListElementRankComparator(), new ListElementMethodTypeComparator(), new ListElementIDComparator()));
+//
+//      LinkedList<ListElement> sorted = new LinkedList<>();
+//      for (ListElement element : list)
+//      {
+//        if(element.payload.rank != 0)
+//          sorted.add(element);
+//      }
+//      for (ListElement element : list)
+//      {
+//        if(element.payload.rank == 0)
+//          sorted.add(element);
+//      }
+    return list;
+  }
+
+    // serialize
+    // deserialize
+
+    /**
+     * int serialization.
+     */
+    byte[] intToByteArray(int i) {
+    byte[] ret = new byte[4];
+
+    ret[0] = (byte) ((i & 0xff000000) >> 24);
+    ret[1] = (byte) ((i & 0x00ff0000) >> 16);
+    ret[2] = (byte) ((i & 0x0000ff00) >> 8);
+    ret[3] = (byte) (i & 0x000000ff);
+
+    return ret;
+  }
+
+    /**
+     * int deserialization.
+     */
+    int byteArrayToInt(byte[] b, int off) {
+    int ret = 0;
+
+    ret |= b[off] << 24;
+    ret |= (b[off + 1] << 24) >>> 8; // must be done this way because of
+    ret |= (b[off + 2] << 24) >>> 16; // java's sign extension of <<
+    ret |= (b[off + 3] << 24) >>> 24;
+
+    return ret;
+  }
+
+    /*
+     * Unordered List serialization:
+     *
+     * n_elem+(seq+int+classname+port+int+source+int+message)*n_elem
+     * n_elem+(seq+int+classname+port+int+source+int+message+int+mtobPayloadBytes)*n_elem
+     *
+     */
+    private byte[] serialize(LinkedList<ListElement> list) {
+
+    ByteArrayOutputStream data = new ByteArrayOutputStream();
+    byte[] bytes = null;
+
+    // number of elements of the list:int
+    try {
+      data.write(intToByteArray(list.size()));
+
+      // now, serialize each element
+      for (int i = 0; i < list.size(); i++) {
+
+        // getting the list element
+        ListElement le = list.get(i);
+        // sequence number:int
+        data.write(intToByteArray(le.seq));
+        // class name
+        bytes = le.se.getClass().getName().getBytes();
+        data.write(intToByteArray(bytes.length));
+        data.write(bytes, 0, bytes.length);
+        // source port:int
+        data.write(intToByteArray(((InetSocketAddress) le.se.source).getPort()));
+        // source host:string
+        String host = ((InetSocketAddress) le.se.source).getAddress().getHostAddress();
+        bytes = host.getBytes();
+        data.write(intToByteArray(bytes.length));
+        data.write(bytes, 0, bytes.length);
+        // message
+        bytes = le.se.getMessage().toByteArray();
+        data.write(intToByteArray(bytes.length));
+        data.write(bytes, 0, bytes.length);
+        byte[] payloadBytes = SerializationUtils.serialize(le.payload);
+        data.write(intToByteArray(payloadBytes.length));
+        data.write(payloadBytes, 0, payloadBytes.length);
+      }
+
+    } catch (IOException e) {
+      System.out.println("[ConsensusUTOSession:serialize]" + e.getMessage());
+    }
+
+    // creating the byte[]
+    bytes = data.toByteArray();
+
+    return bytes;
+  }
+
+    /*
+     * Unordered List DEserialization:
+     *
+     * The byte[] comes like:
+     * n_elem+(seq+int+classname+port+int+source+int+message)*n_elem
+     * n_elem+(seq+int+classname+port+int+source+int+message+int+mtobPayloadBytes)*n_elem
+     *
+     */
+    private LinkedList<ListElement> deserialize(byte[] data, LinkedList<ListElement> myle) {
+
+    LinkedList<ListElement> ret = new LinkedList<ListElement>();
+    int curPos = 0;
+
+    // getting the size of the list
+    int listSize = byteArrayToInt(data, curPos);
+    curPos += 4;
+
+    // getting the elements of the list
+    for (int i = 0; i < listSize; i++) {
+      try {
+        // seq number
+        int seq = byteArrayToInt(data, curPos);
+        curPos += 4;
+        // class name
+        int aux_size = byteArrayToInt(data, curPos);
+        String className = new String(data, curPos + 4, aux_size);
+        curPos += aux_size + 4;
+        // creating the event
+        SendableEvent se = null;
+
+        se = (SendableEvent) Class.forName(className).newInstance();
+        // format known event attributes
+        se.setDir(Direction.UP);
+        se.setSourceSession(this);
+        se.setChannel(channel);
+
+        // source:porto
+        int port = byteArrayToInt(data, curPos);
+        curPos += 4;
+        // source:host
+        aux_size = byteArrayToInt(data, curPos);
+        String host = new String(data, curPos + 4, aux_size);
+        curPos += aux_size + 4;
+        se.source = new InetSocketAddress(InetAddress.getByName(host), port);
+        // finally, the message
+        aux_size = byteArrayToInt(data, curPos);
+        curPos += 4;
+
+        se.getMessage().setByteArray(data, curPos, aux_size);
+        curPos += aux_size;
+        se.init();
+
+        //getting payload object
+
+        int payloadByteslength = byteArrayToInt(data, curPos);
+        curPos += 4;
+        MTOBPayload payload = (MTOBPayload) SerializationUtils.deserialize(Arrays.copyOfRange(data, curPos, curPos+payloadByteslength));
+        curPos += payloadByteslength;
+
+        // creating the element that is the unit of the list
+//        ListElement le = new ListElement(se, seq, myle.get(i).payload);
+        ListElement le = new ListElement(se, seq, payload);
+        // adding this element to the list to return
+        ret.add(le);
+
+      } catch (InstantiationException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:1: "
+                + e.getMessage());
+      } catch (IllegalAccessException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:2: "
+                + e.getMessage());
+      } catch (ClassNotFoundException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:3: "
+                + e.getMessage());
+      } catch (UnknownHostException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:4: "
+                + e.getMessage());
+      } catch (AppiaEventException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:5: "
+                + e.getMessage());
+      } catch (IndexOutOfBoundsException e) {
+        System.out.println("[ConsensusUTOSession:DEserialize]:6: "
+                + e.getMessage());
+      }
+
+    }// for
+
+    return ret;
+  }
+
+  public static void main(String[] args)
+  {
+    int x = 0;
+    long start = new Date().getTime();
+    for(int i = 0; i < 1000000; i++)
+    {
+      if(x == 0)
+        x = 1;
+      else
+        x = 0;
+    }
+    System.out.println(x);
+    long end = new Date().getTime();
+    System.out.println((double)(end-start));
+//    LinkedList<ListElement> my = new LinkedList<>();
+//    MTOBPayload p1 = new MTOBPayload();
+//    p1.m = "(0,22)";
+//    p1.c = null;
+//    p1.rank = 0;
+//    p1.callType = "addCourse";
+//    ListElement e1 = new ListElement(null,0,p1);
+//    MTOBPayload p2 = new MTOBPayload();
+//    p2.m = "(0,500)";
+//    p2.c = "1";
+//    p2.rank = 1;
+//    p2.callType = "deleteCourse";
+//    ListElement e2 = new ListElement(null,0,p2);
+//    MTOBPayload p3 = new MTOBPayload();
+//    p3.m = "(0,231)";
+//    p3.c = null;
+//    p3.rank = 0;
+//    p3.callType = "addCourse";
+//    ListElement e3 = new ListElement(null,0,p3);
+//    MTOBPayload p4 = new MTOBPayload();
+//    p4.m = "(0,229)";
+//    p4.c = null;
+//    p4.rank = 0;
+//    p4.callType = "addCourse";
+//    ListElement e4 = new ListElement(null,0,p4);
+////    MTOBPayload p5 = new MTOBPayload();
+////    p5.m = "m5";
+////    p5.c = "1";
+////    p5.rank = 1;
+//    MTOBPayload p6 = new MTOBPayload();
+//    p6.m = "(0,342)";
+//    p6.c = null;
+//    p6.rank = 0;
+//    p6.callType = "addCourse";
+//    ListElement e6 = new ListElement(null,0,p6);
+//
+//    my.add(e1);
+//    my.add(e2);
+////    my.add(e3);
+//    my.add(e4);
+////    my.add(e6);
+//
+//    for (ListElement e : sort(my))
+//      System.out.println(e.payload);
+
+  }
+
+  }// end of session
+
+  class ListElement implements Serializable, Comparable<ListElement> {
+    /* the message */
+    SendableEvent se;
+    MTOBPayload payload;
+
+    /* sequence number */
+    int seq;
+
+    public ListElement(SendableEvent se, int seq, MTOBPayload pl) {
+      this.se = se;
+      this.seq = seq;
+      this.payload = pl;
+    }
+
+    SendableEvent getSE() {
+      return se;
+    }
+
+    int getSeq() {
+      return seq;
+    }
+
+    public MTOBPayload getPayload() {
+      return payload;
+    }
+
+    @Override
+    public String toString() {
+      return "("+((Call)se.getMessage().peekObject()).methodName+ "->" + payload.m +", "+ payload.c+", "+ payload.rank+")";
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if(((ListElement)obj).payload.m.equals(this.payload.m))
+        return true;
+      else return false;
+    }
+
+    @Override
+    public int compareTo(ListElement o) {
+      return 0;
+    }
+  }
+
+  class ListElementChainedComparator implements Comparator<ListElement>
+  {
+    private List<Comparator<ListElement>> listComparators;
+
+    public ListElementChainedComparator(Comparator<ListElement>... comparators) {
+      this.listComparators = Arrays.asList(comparators);
+    }
+
+    @Override
+    public int compare(ListElement o1, ListElement o2) {
+      for (Comparator<ListElement> comparator : listComparators) {
+        int result = comparator.compare(o2, o1);
+        if (result != 0) {
+          return result;
+        }
+      }
+      return 0;
+    }
+  }
+
+  class ListElementIDComparator implements Comparator<ListElement> {
+
+    @Override
+    public int compare(ListElement emp1, ListElement emp2) {
+      if(emp2.payload.m.length() > emp1.payload.m.length())
+      {
+        return 1;
+      }
+      else if(emp2.payload.m.length() < emp1.payload.m.length())
+      {
+        return -1;
+      }
+      else
+        return emp2.payload.m.compareTo(emp1.payload.m);
+    }
+  }
+
+  class ListElementRankComparator implements Comparator<ListElement> {
+
+    @Override
+    public int compare(ListElement emp1, ListElement emp2) {
+      int cmp = (emp2.payload.rank) > (emp1.payload.rank) ? +1 : (emp2.payload.rank) < (emp1.payload.rank) ? -1 : 0;
+      return cmp;
+    }
+  }
+
+  class ListElementMethodTypeComparator implements Comparator<ListElement> {
+
+    @Override
+    public int compare(ListElement emp1, ListElement emp2) {
+      return emp1.payload.callType.compareTo(emp2.payload.callType);
+    }
+  }

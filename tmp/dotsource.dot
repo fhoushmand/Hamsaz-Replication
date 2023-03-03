@@ -1,0 +1,6 @@
+strict digraph G {
+  1 [ label="withdraw" ];
+  2 [ label="deposit" ];
+  3 [ label="query" ];
+  1 -> 2;
+}

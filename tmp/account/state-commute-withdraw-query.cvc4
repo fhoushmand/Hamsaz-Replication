@@ -1,0 +1,23 @@
+State: TYPE = [# balance: INT #];
+withdraw: (State, INT) -> State = LAMBDA(state: State, a: INT) : 
+(# balance := (state.balance - a) #);
+g_withdraw: (State, INT) -> BOOLEAN = LAMBDA(state: State, a: INT) : 
+(a > 0);
+deposit: (State, INT) -> State = LAMBDA(state: State, a: INT) : 
+(# balance := (state.balance + a) #);
+g_deposit: (State, INT) -> BOOLEAN = LAMBDA(state: State, a: INT) : 
+(a > 0);
+query: (State) -> State = LAMBDA(state: State) : 
+state;
+g_query: (State) -> BOOLEAN = LAMBDA(state: State) : 
+TRUE;
+I: (State) -> BOOLEAN = LAMBDA(state: State) : 
+(state.balance > 0);
+state: State;
+
+a5: INT;
+
+
+ASSERT NOT((g_withdraw(state,a5) AND g_query(state)) => (g_query(withdraw(state,a5)) AND g_withdraw(query(state),a5) AND (withdraw(query(state),a5) = query(withdraw(state,a5)))));
+
+CHECKSAT;
